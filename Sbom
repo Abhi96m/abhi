@@ -1,0 +1,188 @@
+import os
+import json
+import logging
+import datetime
+import traceback
+import boto3
+
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Any
+from boto3.dynamodb.conditions import Attr
+
+# Setup logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Setup DynamoDB tables
+dynamodb = boto3.resource('dynamodb')
+sbom_table = dynamodb.Table(os.getenv("SBOM_TABLE_NAME"))
+container_table = dynamodb.Table(os.getenv("CONTAINER_TABLE_NAME"))
+
+
+# --- Data Classes ---
+
+@dataclass
+class ContainerImage:
+    repository_name: str
+    gitlab_repo: str
+    image_digest: str
+    image_namespace: str
+    image_tag: str
+    image_pushed_at: Optional[datetime.datetime] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        if self.image_pushed_at:
+            data["image_pushed_at"] = self.image_pushed_at.isoformat()
+        return data
+
+
+@dataclass
+class SbomMetadata:
+    app_id: str
+    business_unit: str
+    account_number: str
+    scanned_at: datetime.datetime
+    image_digest: str
+    sbom_format: str
+    sbom_version: str
+    sbom_components: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["scanned_at"] = self.scanned_at.isoformat()
+        return data
+
+
+# --- Utility Functions ---
+
+def convert_to_utc(date: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    if not date:
+        return None
+    if not date.tzinfo:
+        return date.replace(tzinfo=datetime.timezone.utc)
+    return date.astimezone(datetime.timezone.utc)
+
+
+# --- Parsing Logic ---
+
+def parse_sbom_data(sbom_json: dict) -> Optional[Dict[str, Any]]:
+    try:
+        logger.info("Parsing SBOM data")
+
+        target = sbom_json.get('source', {}).get('target', {})
+        labels = target.get('labels', {})
+
+        scm_url = labels.get('com.ally.application.source', '')
+        gitlab_repo = scm_url.replace('https://gitlab.com/', '').replace('.git', '')
+
+        image_digest = target.get("manifestDigest", "")
+        image_tag = sbom_json.get("image_tag", "")
+        image_namespace = sbom_json.get("image_namespace", "")
+        repository_name = sbom_json.get("image_repository", "")
+        account_number = sbom_json.get("aws_account_number", "")
+
+        pushed_at_str = sbom_json.get("last_modified")
+        image_pushed_at = (
+            datetime.datetime.strptime(pushed_at_str, "%a, %d %b %Y %H:%M:%S %z")
+            if pushed_at_str else None
+        )
+        image_pushed_at = convert_to_utc(image_pushed_at)
+
+        business_unit = sbom_json.get("business_unit", "")
+        app_id = sbom_json.get("app_id") or labels.get("com.ally.application.id", "")
+
+        container_image = ContainerImage(
+            repository_name=repository_name,
+            gitlab_repo=gitlab_repo,
+            image_digest=image_digest,
+            image_tag=image_tag,
+            image_namespace=image_namespace,
+            image_pushed_at=image_pushed_at
+        )
+
+        sbom_components = sbom_json.get("sbom", {}).get("components", [])
+        sbom_metadata = SbomMetadata(
+            app_id=app_id,
+            business_unit=business_unit,
+            account_number=account_number,
+            scanned_at=datetime.datetime.now(tz=datetime.timezone.utc),
+            image_digest=image_digest,
+            sbom_format=sbom_json.get("sbom", {}).get("format", ""),
+            sbom_version=sbom_json.get("sbom", {}).get("version", ""),
+            sbom_components=sbom_components
+        )
+
+        return {
+            "container_image": container_image,
+            "sbom_metadata": sbom_metadata
+        }
+
+    except Exception as e:
+        logger.error(f"Error parsing SBOM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+# --- Database Functions ---
+
+def save_container_image(container: ContainerImage) -> bool:
+    try:
+        container_table.put_item(Item=container.to_dict())
+        logger.info(f"Saved container metadata for digest {container.image_digest}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save container metadata: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+
+def save_sbom_metadata(sbom: SbomMetadata) -> bool:
+    try:
+        sbom_table.put_item(Item=sbom.to_dict())
+        logger.info(f"Saved SBOM metadata for digest {sbom.image_digest}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save SBOM metadata: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+
+# --- Handler Function ---
+
+def handle_sbom_submission(request_data: dict) -> Dict[str, Any]:
+    try:
+        parsed_data = parse_sbom_data(request_data)
+        if not parsed_data:
+            return {
+                "statusCode": 400,
+                "body": {"status": "error", "message": "Invalid SBOM data"}
+            }
+
+        container_image = parsed_data["container_image"]
+        sbom_metadata = parsed_data["sbom_metadata"]
+
+        container_success = save_container_image(container_image)
+        sbom_success = save_sbom_metadata(sbom_metadata)
+
+        if container_success and sbom_success:
+            return {
+                "statusCode": 200,
+                "body": {
+                    "status": "success",
+                    "message": "SBOM data and container metadata stored successfully"
+                }
+            }
+        else:
+            return {
+                "statusCode": 500,
+                "body": {"status": "error", "message": "Failed to save one or more entries"}
+            }
+
+    except Exception as e:
+        logger.error(f"Unhandled error in SBOM submission: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            "statusCode": 500,
+            "body": {"status": "error", "message": "Internal server error"}
+        }
