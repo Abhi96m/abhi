@@ -1,0 +1,35 @@
+<template>
+  <div class="top-level-view">
+    <h2>Container Images</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Image Org</th>
+          <th>Image Repo</th>
+          <th>Image Tag</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="(item, index) in images" :key="index" @click="goToDrillDown(item)">
+          <td>{{ item.org }}</td>
+          <td>{{ item.repo }}</td>
+          <td>{{ item.tag }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</template>
+
+<script setup>
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
+
+const images = [
+  { org: 'test-org', repo: 'test-repo', tag: 'stable', digest: 'sha256:abcd1234' }
+]
+
+function goToDrillDown(image) {
+  router.push({ name: 'DrillDown', params: { org: image.org, repo: image.repo, digest: image.digest } })
+}
+</script>
