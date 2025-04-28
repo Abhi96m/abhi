@@ -1,0 +1,88 @@
+<template>
+  <div class="drill-down-view">
+    <h2>{{ org }}/{{ repo }}:{{ digest }}</h2>
+
+    <div class="tabs">
+      <button @click="activeTab = 'sbom'">SBOM View</button>
+      <button @click="activeTab = 'eol'">EOL View</button>
+      <button @click="activeTab = 'vuln'">Vulnerability View</button>
+    </div>
+
+    <div class="tab-content">
+      <table v-if="activeTab === 'sbom'">
+        <thead>
+          <tr><th>Product</th><th>Version</th><th>Type</th><th>Info</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(item, index) in sbomData" :key="index">
+            <td>{{ item.product }}</td>
+            <td>{{ item.version }}</td>
+            <td>{{ item.type }}</td>
+            <td><button @click="showDetails(item)">i</button></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <table v-if="activeTab === 'eol'">
+        <thead>
+          <tr><th>Product</th><th>Version</th><th>EOL Date</th><th>Info</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(item, index) in eolData" :key="index">
+            <td>{{ item.product }}</td>
+            <td>{{ item.version }}</td>
+            <td>{{ item.eolDate }}</td>
+            <td><button @click="showDetails(item)">i</button></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <table v-if="activeTab === 'vuln'">
+        <thead>
+          <tr><th>Vulnerability</th><th>Severity</th><th>Package</th><th>Info</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(item, index) in vulnData" :key="index">
+            <td>{{ item.vulnId }}</td>
+            <td>{{ item.severity }}</td>
+            <td>{{ item.packageName }}</td>
+            <td><button @click="showDetails(item)">i</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ComponentPopup v-if="selectedComponent" :component="selectedComponent" @close="selectedComponent = null" />
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { useRoute } from 'vue-router'
+import ComponentPopup from './ComponentPopup.vue'
+
+const route = useRoute()
+const org = route.params.org
+const repo = route.params.repo
+const digest = route.params.digest
+
+const activeTab = ref('sbom')
+const selectedComponent = ref(null)
+
+// Sample loaded data (in real app, load this at page load!)
+const sbomData = ref([
+  { product: 'Debian', version: '12.10', type: 'Package' }
+])
+
+const eolData = ref([
+  { product: 'Debian', version: '12.10', eolDate: '2025-04-22' }
+])
+
+const vulnData = ref([
+  { vulnId: 'CVE-2024-1234', severity: 'High', packageName: 'openssl' }
+])
+
+function showDetails(item) {
+  selectedComponent.value = item
+}
+</script>
