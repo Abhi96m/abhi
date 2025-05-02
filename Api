@@ -1,0 +1,148 @@
+import json
+import boto3
+import uuid
+from boto3.dynamodb.conditions import Key, Attr
+
+dynamodb = boto3.resource('dynamodb')
+quay_table = dynamodb.Table('QuayOrgTable')      # Update with actual table name
+sbom_table = dynamodb.Table('SBOMComponentTable')  # Update with actual table name
+
+def lambda_handler(event, context):
+    method = event['httpMethod']
+    if method == 'POST':
+        return handle_post(event)
+    elif method == 'GET':
+        return handle_get(event)
+    elif method == 'DELETE':
+        return handle_delete(event)
+    else:
+        return {"statusCode": 405, "body": "Method Not Allowed"}
+
+def handle_post(event):
+    try:
+        body = json.loads(event['body'])
+
+        # Detect raw vs wrapped
+        if 'sbom' in body:
+            sbom = body['sbom']
+            image_org = body.get('image_organization')
+            image_repo = body.get('image_repository')
+        else:
+            sbom = body
+            meta_comp = sbom.get('metadata', {}).get('component', {})
+            image_full = meta_comp.get('name', '')
+            if '/' not in image_full:
+                return {"statusCode": 400, "body": "Cannot infer image_organization/repository"}
+            org_repo = image_full.split(':')[0]
+            image_org, image_repo = org_repo.split('/')[:2]
+
+        # Get quay UUID
+        quay_resp = quay_table.scan(
+            FilterExpression=Attr('image_organization').eq(image_org) & Attr('image_repository').eq(image_repo)
+        )
+        if not quay_resp['Items']:
+            return {"statusCode": 404, "body": "Quay UUID not found"}
+        quay_uuid = quay_resp['Items'][0]['quay_uuid']
+
+        # Delete old components for this quay_uuid
+        delete_resp = sbom_table.scan(
+            FilterExpression=Attr('quay_uuid').eq(quay_uuid)
+        )
+        with sbom_table.batch_writer() as batch:
+            for item in delete_resp['Items']:
+                batch.delete_item(Key={"uuid": item["uuid"]})
+
+        # Add new components
+        components = sbom.get('components', [])
+        with sbom_table.batch_writer() as batch:
+            for comp in components:
+                item = {
+                    "uuid": str(uuid.uuid4()),
+                    "quay_uuid": quay_uuid,
+                    "component_name": comp.get('name'),
+                    "component_version": comp.get('version'),
+                    "component_type": comp.get('type'),
+                    "component_properties": comp.get('properties', []),
+                }
+                batch.put_item(Item=item)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": "SBOM components updated", "count": len(components)})
+        }
+
+    except Exception as e:
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+def handle_get(event):
+    try:
+        params = event.get('queryStringParameters', {}) or {}
+        image_org = params.get('image_organization')
+        image_repo = params.get('image_repository')
+        page_token = params.get('last_evaluated_key')
+
+        if not image_org or not image_repo:
+            return {"statusCode": 400, "body": "Missing image_organization or image_repository"}
+
+        quay_resp = quay_table.scan(
+            FilterExpression=Attr('image_organization').eq(image_org) & Attr('image_repository').eq(image_repo)
+        )
+        if not quay_resp['Items']:
+            return {"statusCode": 404, "body": "Quay UUID not found"}
+        quay_uuid = quay_resp['Items'][0]['quay_uuid']
+
+        kwargs = {
+            'FilterExpression': Attr('quay_uuid').eq(quay_uuid),
+            'Limit': 50
+        }
+
+        if page_token:
+            kwargs['ExclusiveStartKey'] = json.loads(page_token)
+
+        response = sbom_table.scan(**kwargs)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "components": response.get('Items', []),
+                "last_evaluated_key": json.dumps(response.get('LastEvaluatedKey')) if 'LastEvaluatedKey' in response else None
+            })
+        }
+
+    except Exception as e:
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+def handle_delete(event):
+    try:
+        body = json.loads(event['body'])
+        image_org = body.get('image_organization')
+        image_repo = body.get('image_repository')
+
+        if not image_org or not image_repo:
+            return {"statusCode": 400, "body": "Missing image_organization or image_repository"}
+
+        quay_resp = quay_table.scan(
+            FilterExpression=Attr('image_organization').eq(image_org) & Attr('image_repository').eq(image_repo)
+        )
+        if not quay_resp['Items']:
+            return {"statusCode": 404, "body": "Quay UUID not found for provided image"}
+
+        quay_uuid = quay_resp['Items'][0]['quay_uuid']
+
+        delete_resp = sbom_table.scan(
+            FilterExpression=Attr('quay_uuid').eq(quay_uuid)
+        )
+
+        deleted_count = 0
+        with sbom_table.batch_writer() as batch:
+            for item in delete_resp['Items']:
+                batch.delete_item(Key={"uuid": item["uuid"]})
+                deleted_count += 1
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": f"Deleted {deleted_count} components for quay_uuid {quay_uuid}"})
+        }
+
+    except Exception as e:
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
