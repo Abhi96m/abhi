@@ -1,0 +1,19 @@
+stages:
+  - audit
+
+audit_report:
+  stage: audit
+  image: python:3.9
+  variables:
+    GIT_STRATEGY: fetch
+  before_script:
+    - python3 -m pip install --upgrade pip
+    - pip3 install requests pyyaml pandas openpyxl
+  script:
+    - export CI_JOB_TOKEN="$CI_JOB_TOKEN"
+    - python3 automation_script.py
+  artifacts:
+    paths:
+      - audit_report.xlsx
+      - components.yaml
+    expire_in: 2 weeks
